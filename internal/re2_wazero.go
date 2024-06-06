@@ -8,8 +8,11 @@ import (
 	_ "embed"
 	"encoding/binary"
 	"errors"
+	"github.com/sirupsen/logrus"
+	"golang.org/x/sync/semaphore"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -35,6 +38,29 @@ var libre2 []byte
 //
 //go:embed wasm/memory.wasm
 var memoryWasm []byte
+var modChan chan *childModule
+
+//var modChan = make(chan *childModule, MAX_COUNCURRENT)
+
+//type MyMutex struct {
+//	mutex   sync.Mutex
+//	blocked int32
+//}
+
+var sem *semaphore.Weighted
+
+//
+//func (m *MyMutex) LockC() {
+//	atomic.AddInt32(&m.blocked, 1)
+//	//logrus.Warnf("_+_+_+_+_+_+_+_+_+_+_+_+ blocking: %v", atomic.LoadInt32(&m.blocked))
+//	m.mutex.Lock()
+//	atomic.AddInt32(&m.blocked, -1)
+//}
+//func (m *MyMutex) UnlockC() {
+//	m.mutex.Unlock()
+//}
+
+var MAX_COUNCURRENT int
 
 var (
 	wasmRT       wazero.Runtime
@@ -138,24 +164,66 @@ func createChildModule(rt wazero.Runtime, root api.Module) *childModule {
 // for now, a lock here is no more than before we added threads support.
 
 func getChildModule() *childModule {
-	modPoolMu.Lock()
-	e := modPool.Front()
-	if e == nil {
-		modPoolMu.Unlock()
-		return createChildModule(wasmRT, rootMod)
-	}
-	modPool.Remove(e)
-	modPoolMu.Unlock()
-	return e.Value.(*childModule)
+	modH := <-modChan
+	return modH
 }
 
 func putChildModule(cm *childModule) {
-	modPoolMu.Lock()
-	modPool.PushBack(cm)
-	modPoolMu.Unlock()
+	modChan <- cm
+}
+
+//func getChildModule() *childModule {
+//	//modPoolMu.Lock()
+//	//modPoolMu.LockC()
+//	//fmt.Printf("###### IN GET .... goroutine Num is %v\n", runtime.NumGoroutine())
+//	e := modPool.Front()
+//	if e == nil {
+//		//logrus.Warnf("----> re2 will add new element, size is %v", modPool.Len())
+//		modPoolMu.Unlock()
+//		//modPoolMu.UnlockC()
+//		return createChildModule(wasmRT, rootMod)
+//	}
+//	runtime.NumGoroutine()
+//	//logrus.Warnf("----> re2 will remove old element, size is %v", modPool.Len())
+//	modPool.Remove(e)
+//	//logrus.Warnf("----> re2 removed old element, size is %v", modPool.Len())
+//	modPoolMu.Unlock()
+//	//modPoolMu.UnlockC()
+//	return e.Value.(*childModule)
+//}
+//
+//func putChildModule(cm *childModule) {
+//	modPoolMu.Lock()
+//	//modPoolMu.Lock()
+//	//fmt.Printf("###### IN PUT .... goroutine Num is %v\n", runtime.NumGoroutine())
+//	modPool.PushBack(cm)
+//	//logrus.Warnf("----> re2 putted element, size is %v", modPool.Len())
+//	modPoolMu.Unlock()
+//	//modPoolMu.Unlock()
+//}
+
+func initFixedSizePool() {
+	maxThreadsStr := os.Getenv("TEQILA_RE2_MAX_THREADS")
+
+	var err error
+	MAX_COUNCURRENT, err = strconv.Atoi(maxThreadsStr)
+	if err != nil {
+		MAX_COUNCURRENT = runtime.NumCPU() // 设置默认值
+		logrus.Warnf("GO_RE2_maxThreadsStr use default, val is %v", MAX_COUNCURRENT)
+	} else {
+		logrus.Warnf("GO_RE2_maxThreadsStr is %v", MAX_COUNCURRENT)
+	}
+
+	modChan = make(chan *childModule, MAX_COUNCURRENT)
+	for i := 0; i < MAX_COUNCURRENT; i++ {
+		modChan <- createChildModule(wasmRT, rootMod)
+	}
+
+	//sem = semaphore.NewWeighted(int64(MAX_COUNCURRENT))
 }
 
 func init() {
+
 	ctx := context.Background()
 
 	rtCfg := wazero.NewRuntimeConfig().WithCoreFeatures(api.CoreFeaturesV2 | experimental.CoreFeaturesThreads)
@@ -202,7 +270,8 @@ func init() {
 	wasmMemory = root.Memory()
 	rootMod = root
 
-	modPool = list.New()
+	initFixedSizePool()
+	//modPool = list.New()
 }
 
 func newABI() *libre2ABI {
@@ -662,6 +731,8 @@ func (f *lazyFunction) Call8(ctx context.Context, arg1 uint64, arg2 uint64, arg3
 }
 
 func (f *lazyFunction) callWithStack(ctx context.Context, callStack []uint64) (uint64, error) {
+	//fmt.Printf("###### BEFORE EXEC .... goroutine Num is %v\n", runtime.NumGoroutine())
+
 	modH := getChildModule()
 	defer putChildModule(modH)
 
@@ -670,6 +741,7 @@ func (f *lazyFunction) callWithStack(ctx context.Context, callStack []uint64) (u
 		fun = modH.mod.ExportedFunction(f.name)
 		modH.functions[f.name] = fun
 	}
+	//fmt.Printf("###### IN EXEC .... goroutine Num is %v\n", runtime.NumGoroutine())
 
 	if err := fun.CallWithStack(ctx, callStack); err != nil {
 		return 0, err
