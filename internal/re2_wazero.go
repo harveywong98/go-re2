@@ -8,6 +8,7 @@ import (
 	_ "embed"
 	"encoding/binary"
 	"errors"
+	"github.com/sirupsen/logrus"
 	"os"
 	"runtime"
 	"strings"
@@ -141,10 +142,12 @@ func getChildModule() *childModule {
 	modPoolMu.Lock()
 	e := modPool.Front()
 	if e == nil {
+		logrus.Warnf("----> re2 will add new element, size is %v", modPool.Len())
 		modPoolMu.Unlock()
 		return createChildModule(wasmRT, rootMod)
 	}
 	modPool.Remove(e)
+	logrus.Warnf("----> re2 will remove old element, size is %v", modPool.Len())
 	modPoolMu.Unlock()
 	return e.Value.(*childModule)
 }
@@ -152,6 +155,7 @@ func getChildModule() *childModule {
 func putChildModule(cm *childModule) {
 	modPoolMu.Lock()
 	modPool.PushBack(cm)
+	logrus.Warnf("----> re2 putted element, size is %v", modPool.Len())
 	modPoolMu.Unlock()
 }
 
